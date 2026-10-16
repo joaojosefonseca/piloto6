@@ -1,0 +1,101 @@
+name: QA ASR audio publico se identico as fontes originais
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/adolescencias-u234-asr-probe.yml'
+permissions:
+  contents: read
+jobs:
+  asr-publico:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - unit: u2
+            expected_bytes: 25796755
+            urls: "https://objetaprendizagemadolescenc.netlify.app/media/unidade-2.mp4"
+          - unit: u3
+            expected_bytes: 27285983
+            urls: "https://objetaprendizagemadolescenc.netlify.app/media/unidade-3.mp4"
+          - unit: u4a
+            expected_bytes: 67397481
+            urls: "https://objetaprendizagemadolescenc.netlify.app/media/unidade-4-video-1.mp4 https://objetaprendizagemadolescenc.netlify.app/media/unidade-4-1.mp4"
+          - unit: u4b
+            expected_bytes: 52113672
+            urls: "https://objetaprendizagemadolescenc.netlify.app/media/unidade-4-video-2.mp4 https://objetaprendizagemadolescenc.netlify.app/media/unidade-4-2.mp4"
+    steps:
+      - name: Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Provar disponibilidade e tamanho antes de qualquer transcricao
+        id: input
+        env:
+          UNIT: ${{ matrix.unit }}
+          EXPECTED: ${{ matrix.expected_bytes }}
+          URLS: ${{ matrix.urls }}
+        shell: bash
+        run: |
+          mkdir -p output
+          printf 'NAO EXECUTADO. Nenhuma fonte publica comprovada ate este momento.\n' > output/STATUS.txt
+          echo "matched=no" >> "$GITHUB_OUTPUT"
+          for u in $URLS; do
+            echo "Consultando uma URL publica candidata: $u"
+            if curl -fsSL --retry 1 --connect-timeout 15 --max-time 180 "$u" -o source.mp4; then
+              got=$(stat -c %s source.mp4)
+              echo "Tamanho=$got, esperado=$EXPECTED"
+              if [ "$got" = "$EXPECTED" ]; then
+                sha256sum source.mp4 > output/FONTE_SHA256.txt
+                printf 'URL publica com mesmo tamanho da fonte canonica. SHA registrado; revisar equivalencia da fonte antes de homologar.\n' > output/STATUS.txt
+                echo "matched=yes" >> "$GITHUB_OUTPUT"
+                break
+              fi
+            fi
+            rm -f source.mp4
+          done
+      - name: Instalar dependencias somente se houver fonte
+        if: steps.input.outputs.matched == 'yes'
+        run: python -m pip install --disable-pip-version-check --no-cache-dir "faster-whisper==1.2.1"
+      - name: Transcrever fala audivel, nunca roteiro de texto
+        if: steps.input.outputs.matched == 'yes'
+        env:
+          UNIT: ${{ matrix.unit }}
+        run: |
+          cat > /tmp/asr.py <<'PY'
+          import json,os,re
+          from pathlib import Path
+          from faster_whisper import WhisperModel
+          u=os.environ["UNIT"]
+          model=WhisperModel("small",device="cpu",compute_type="int8",cpu_threads=4)
+          seg,info=model.transcribe("source.mp4",language="pt",beam_size=5,vad_filter=True,word_timestamps=True,condition_on_previous_text=False)
+          data=[]
+          for s in seg:
+              data.append(dict(start=s.start,end=s.end,text=s.text.strip(),avg_logprob=s.avg_logprob,no_speech_prob=s.no_speech_prob,words=[dict(start=w.start,end=w.end,word=w.word,probability=w.probability) for w in (s.words or [])]))
+          assert len(data)>=10,"Fonte sem fala suficiente; revisar"
+          def stamp(t,sep):
+              ms=max(0,round(float(t)*1000));h,ms=divmod(ms,3600000);m,ms=divmod(ms,60000);s,ms=divmod(ms,1000)
+              return f"{h:02}:{m:02}:{s:02}{sep}{ms:03}"
+          out=Path("output")
+          (out/f"{u}_ASR_PALAVRAS.json").write_text(json.dumps(dict(language=info.language,duration=info.duration,segments=data),ensure_ascii=False,indent=2),encoding="utf-8")
+          srt=[];vtt=["WEBVTT",""]
+          for i,x in enumerate(data,1):
+              line=re.sub(r"\\s+"," ",x["text"]).strip()
+              srt += [str(i),f"{stamp(x['start'],',')} --> {stamp(x['end'],',')}",line,""]
+              vtt += [f"{stamp(x['start','.')} --> {stamp(x['end','.')}",line,""]
+          (out/f"{u}_ASR_CANDIDATO.srt").write_text("\\n".join(srt),encoding="utf-8")
+          (out/f"{u}_ASR_CANDIDATO.vtt").write_text("\\n".join(vtt),encoding="utf-8")
+          with (out/"STATUS.txt").open("a",encoding="utf-8") as f:
+              f.write(f"ASR executado sobre audio real; {len(data)} segmentos; falta escuta e revisao humana. NAO PUBLICAR.\\n")
+          PY
+          python /tmp/asr.py
+      - name: Evidencias e legendas temporarias
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ASR_${{ matrix.unit }}_CANDIDATO_SEM_HOMOLOGACAO
+          path: output/
+          if-no-files-found: error
+          retention-days: 2
