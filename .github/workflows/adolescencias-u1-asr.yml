@@ -1,0 +1,69 @@
+name: QA transcription Adolescencias U1 (CPU only)
+on:
+  push:
+    branches:
+      - qa/adolescencias-u1-asr-20261015
+    paths:
+      - .github/workflows/adolescencias-u1-asr.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  transcribe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 28
+    steps:
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install CPU transcription dependencies
+        run: |
+          python -m pip install --disable-pip-version-check --no-cache-dir "faster-whisper==1.2.1"
+          ffmpeg -version | head -1
+      - name: Retrieve published U1 narration
+        run: |
+          curl -fL --retry 2 --connect-timeout 30 --max-time 300 "https://objetaprendizagemadolescenc.netlify.app/media/unidade-1.mp4" -o unidade-1.mp4
+          ffprobe -v error -show_entries format=duration,size -of json unidade-1.mp4
+          test $(stat -c %s unidade-1.mp4) -gt 30000000
+      - name: Run Whisper-small CPU Portuguese ASR
+        run: |
+          mkdir -p output
+          cat > /tmp/transcribe.py <<'PY'
+          from faster_whisper import WhisperModel
+          from pathlib import Path
+          import json, re
+          model = WhisperModel("small", device="cpu", compute_type="int8", cpu_threads=4, num_workers=1)
+          gen, info = model.transcribe("unidade-1.mp4", language="pt", task="transcribe", beam_size=5, vad_filter=True, word_timestamps=True, condition_on_previous_text=False)
+          segments = list(gen)
+          assert len(segments)>5, "No complete speech transcription"
+          Path("output").mkdir(exist_ok=True)
+          data=[]
+          for s in segments:
+            data.append({"start":s.start, "end":s.end, "text":s.text.strip(),"avg_logprob":s.avg_logprob,"no_speech_prob":s.no_speech_prob,"words":[{"start":w.start,"end":w.end,"word":w.word,"probability":w.probability} for w in (s.words or [])]})
+          Path("output/ASR_PALAVRAS_E_SEGMENTOS_CANDIDATO.json").write_text(json.dumps({"detected_language":info.language,"duration":info.duration,"segments":data},ensure_ascii=False,indent=2),encoding="utf-8")
+          def stamp(t,sep):
+            ms=max(0,round(float(t)*1000));h,ms=divmod(ms,3600000);m,ms=divmod(ms,60000);s,ms=divmod(ms,1000)
+            return f"{h:02}:{m:02}:{s:02}{sep}{ms:03}"
+          captions=[(r['start'],r['end'],r['text']) for r in data if r['text']]
+          srt=[]
+          vtt=['WEBVTT','']
+          for i,(s,e,t) in enumerate(captions,1):
+            t=re.sub(r'\s+',' ',t).strip()
+            srt += [str(i),f"{stamp(s,',')} --> {stamp(e,',')}",t,'']
+            vtt += [f"{stamp(s,'.')} --> {stamp(e,'.')}",t,'']
+          Path("output/U1_LEGENDAS_ASR_CANDIDATO.srt").write_text('\n'.join(srt),encoding="utf-8")
+          Path("output/U1_LEGENDAS_ASR_CANDIDATO.vtt").write_text('\n'.join(vtt),encoding="utf-8")
+          Path("output/U1_TRANSCRICAO_ASR_CANDIDATO.txt").write_text('\n'.join(f"[{stamp(x['start'],'.')}] {x['text']}" for x in data),encoding="utf-8")
+          Path("output/STATUS.txt").write_text("ASR automatico: candidato sem revisao humana/acustica. Necessita confrontacao com audio. Nao publicar automaticamente.\n",encoding="utf-8")
+          print(f"Transcription candidate: {len(segments)} segments, source seconds={info.duration}, lang={info.language}")
+          PY
+          python /tmp/transcribe.py
+      - name: Save transcription candidate to artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: U1_WHISPER_PTBR_ASR_QA
+          path: output/
+          if-no-files-found: warn
+          retention-days: 2
