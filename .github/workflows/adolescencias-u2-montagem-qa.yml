@@ -64,6 +64,9 @@ jobs:
           sr=48000; first=[0.0,34.3,68.6,102.8,171.4,205.7,239.9,274.4,334.0]
           energy=np.sqrt(np.mean(audio[:len(audio)//480*480].reshape(-1,480)**2,axis=1))
           events=[]; src_cursor=0; components=[]; lead=0.28;tail=0.38
+          def quiet(pos):
+              lo=int(pos*100);hi=min(len(energy),lo+18)
+              return float(np.mean(energy[lo:hi])) if hi>lo else 100
           for idx,(anchor,wav) in enumerate(zip(first,clips)):
               w,rate=sf.read(wav,dtype="float32")
               if w.ndim>1:w=w.mean(axis=1)
