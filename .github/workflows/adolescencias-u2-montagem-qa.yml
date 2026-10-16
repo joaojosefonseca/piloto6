@@ -1,0 +1,185 @@
+name: QA U2 renderizar Dora incorporada com ASR real
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/adolescencias-u2-montagem-qa.yml'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  montagem-qa:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Validar e obter fonte publica somente leitura
+        run: |
+          curl -fLsS --retry 2 --max-time 300 https://objetaprendizagemadolescenc.netlify.app/media/unidade-2.mp4 -o source.mp4
+          test $(stat -c %s source.mp4) -eq 25796755
+          sha256sum source.mp4
+      - name: Recuperar os audios Dora e ASR da propria execucao QA
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download 38881864401 -R joaojosefonseca/piloto6 -n AD_DORA_u2_CANDIDATO_QA --dir voices
+          gh run download 38885757896 -R joaojosefonseca/piloto6 -n ASR_u2_CANDIDATO_SEM_HOMOLOGACAO --dir asr
+          test $(find voices -name 'AD_*_DORA_PTBR.wav' | wc -l) -eq 9
+          test -f asr/u2_ASR_PALAVRAS.json
+      - name: Ferramentas de audio e montagem CPU
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg fonts-dejavu-core libsndfile1
+          python -m pip install --disable-pip-version-check --no-cache-dir "numpy>=1.26,<2.3" "scipy>=1.12" "soundfile>=0.12"
+      - name: Pausar quadro e narração, incorporar Dora, remapear legendas
+        run: |
+          cat > /tmp/montar.py <<'PY'
+          from pathlib import Path
+          import json, math, re, subprocess, hashlib, textwrap
+          import numpy as np
+          import soundfile as sf
+          from scipy.signal import resample_poly
+          
+          OUT=Path("output"); OUT.mkdir(exist_ok=True)
+          SRC=Path("source.mp4")
+          VOICE=Path("voices")
+          ASR=Path("asr")/"u2_ASR_PALAVRAS.json"
+          assert SRC.is_file() and SRC.stat().st_size==25796755, "Gate: tamanho distinto"
+          assert ASR.is_file(), "ASR real ausente"
+          clips=sorted(VOICE.glob("AD_*_DORA_PTBR.wav"))
+          assert len(clips)==9, f"Esperados 9 WAV Dora, recebidos {len(clips)}"
+          manifest=json.loads((VOICE/"manifest.json").read_text(encoding="utf-8"))
+          assert manifest["voice"]=="pf_dora" and len(manifest["clips"])==9
+          asr=json.loads(ASR.read_text(encoding="utf-8"))
+          assert len(asr["segments"])>30, "ASR não parece completo"
+          
+          def call(cmd):
+              subprocess.run(cmd,check=True)
+          
+          call(["ffmpeg","-nostdin","-v","error","-y","-i",str(SRC),"-vn","-ar","48000","-ac","1","-f","f32le","original_audio.f32"])
+          audio=np.fromfile("original_audio.f32",dtype="<f4")
+          sr=48000; first=[0.0,34.3,68.6,102.8,171.4,205.7,239.9,274.4,334.0]
+          energy=np.sqrt(np.mean(audio[:len(audio)//480*480].reshape(-1,480)**2,axis=1))
+          events=[]; src_cursor=0; components=[]; lead=0.28;tail=0.38
+          def quiet(pos):
+              lo=int(pos*100);hi=min(len(energy),lo+18)
+              return float(np.mean(energy[lo:hi])) if hi>lo else 100
+          for idx,(anchor,wav) in enumerate(zip(first,clips)):
+              w,rate=sf.read(wav,dtype="float32")
+              if w.ndim>1:w=w.mean(axis=1)
+              if rate==24000:w=resample_poly(w,2,1).astype("float32")
+              elif rate!=48000:raise RuntimeError(f"Taxa inesperada: {rate}")
+              rms=float(np.sqrt(np.mean(w*w)))
+              if rms>0:
+                  goal=10**(-22/20)
+                  gain=min(goal/rms,0.89/max(float(np.max(np.abs(w))),1e-9))
+                  w=np.asarray(w*gain,dtype="<f4")
+              if idx==0:t=0.0
+              else:
+                  start=max(0.0,anchor+0.15)
+                  end=min(anchor+2.05,len(audio)/sr-0.9)
+                  options=np.arange(start,end,0.05)
+                  def quiet(pos):
+                      lo=int(pos*100);hi=min(len(energy),lo+18)
+                      return float(np.mean(energy[lo:hi])) if hi>lo else 100
+                  t=float(min(options,key=quiet)) if len(options) else float(anchor)
+              sample=int(round(t*sr))
+              assert sample>=src_cursor and sample<=len(audio)
+              before=audio[src_cursor:sample]
+              silence_pre=np.zeros(int(round(lead*sr)),dtype="<f4")
+              silence_post=np.zeros(int(round(tail*sr)),dtype="<f4")
+              components.extend([before,silence_pre,w,silence_post])
+              d=(len(silence_pre)+len(w)+len(silence_post))/sr
+              events.append({"index":idx+1,"original_time":t,"duration":d,"voice_seconds":len(w)/sr,"lead":lead,"tail":tail,"text":manifest["clips"][idx]["text"],"file":wav.name,"silence_rms":quiet(t)})
+              src_cursor=sample
+          components.append(audio[src_cursor:])
+          combined=np.concatenate(components)
+          sf.write(OUT/"U2_AUDIO_ORIGINAL_MAIS_DORA_QA.wav",combined,sr,subtype="PCM_16")
+          assert len(combined)==len(audio)+sum(round(x["duration"]*sr) for x in events)
+          
+          def shifted(t):
+              return t + sum(e["duration"] for e in events if e["original_time"]<=t)
+          def wrap(s,maxwidth=41):
+              return "\n".join(textwrap.wrap(s,width=maxwidth,break_long_words=False,break_on_hyphens=False))
+          def chunks(text,limit=76):
+              words=text.split(); arr=[]; cur=[]
+              for word in words:
+                  if len(" ".join(cur+[word]))>limit and cur:
+                      arr.append(" ".join(cur));cur=[]
+                  cur.append(word)
+              if cur:arr.append(" ".join(cur))
+              return arr
+          def stamp(sec):
+              ms=max(0,int(round(sec*1000)));h,ms=divmod(ms,3600000);m,ms=divmod(ms,60000);s,ms=divmod(ms,1000)
+              return f"{h:02}:{m:02}:{s:02},{ms:03}"
+          cues=[]
+          words=[]
+          for seg in asr["segments"]:
+              for w in seg.get("words",[]):
+                  start=float(w["start"]);end=float(w["end"]);word=str(w["word"]).strip()
+                  if end>start and word:words.append((start,end,word))
+          words.sort(key=lambda x:x[0])
+          assert len(words)>350,f"ASR não apresenta palavras suficientes ({len(words)})"
+          regions=[0.0]+[e["original_time"] for e in events if e["original_time"]>0.0]+[len(audio)/sr+0.01]
+          for a,b in zip(regions[:-1],regions[1:]):
+              list_words=[x for x in words if a<=x[0]<b]
+              group=[]
+              def emit(g):
+                  if not g:return
+                  s,e=g[0][0],min(b,g[-1][1])
+                  txt=" ".join(x[2] for x in g)
+                  if e-s>=0.15:cues.append((shifted(s),shifted(e),wrap(txt)))
+              for item in list_words:
+                  length=len(" ".join(x[2] for x in group+[item]))
+                  if group and (length>74 or item[1]-group[0][0]>5.2):
+                      emit(group);group=[]
+                  group.append(item)
+              emit(group)
+          delay=0
+          for e in events:
+              start=e["original_time"]+delay+lead
+              allparts=chunks(e["text"])
+              total=sum(max(1,len(x)) for x in allparts)
+              voice_end=start+e["voice_seconds"];pos=start
+              for i,part in enumerate(allparts):
+                  piece=e["voice_seconds"]*max(1,len(part))/total
+                  stop=min(voice_end,pos+piece)
+                  cues.append((pos,stop,wrap(("[Audiodescrição] " if i==0 else "")+part)))
+                  pos=stop
+              delay+=e["duration"]
+          cues.sort(key=lambda x:x[0])
+          lines=[]
+          for i,(s,e,t) in enumerate(cues,1):
+              if e<=s:continue
+              lines += [str(i),stamp(s)+" --> "+stamp(e),t,""]
+          (OUT/"U2_LEGENDAS_FALA_REAL_E_DORA_ASR_QA.srt").write_text("\n".join(lines),encoding="utf-8")
+          vtt="WEBVTT\n\n"+"\n".join("\n".join([stamp(s).replace(",","." )+" --> "+stamp(e).replace(",","."),t,""]) for s,e,t in cues)
+          (OUT/"U2_LEGENDAS_FALA_REAL_E_DORA_ASR_QA.vtt").write_text(vtt,encoding="utf-8")
+          sha=hashlib.sha256(SRC.read_bytes()).hexdigest()
+          qa={"source_size_bytes":SRC.stat().st_size,"source_sha256":sha,"asr_source":"reconhecimento Whisper-small do áudio de fonte pública do mesmo tamanho do master do Drive; equivalência SHA com master privado pendente","voice":"Kokoro-82M pf_dora 24 kHz; 9 WAV","events":events,"original_duration_s":len(audio)/sr,"rendered_audio_duration_s":len(combined)/sr,"original_audio_samples":len(audio),"preserved_source_audio_samples":sum(len(x) for i,x in enumerate(components) if i%4==0),"captions_count":len(cues),"qa":"CANDIDATO TECNICO. NAO PUBLICAR. Exige revisao literal por escuta, sincronismo, audiodescricao visual e acessibilidade.","no_deploy":True}
+          (OUT/"QA_MONTAGEM_U2.json").write_text(json.dumps(qa,ensure_ascii=False,indent=2),encoding="utf-8")
+          expr="PTS-STARTPTS"+"".join(f"+gte(T,{e['original_time']:.3f})*{e['duration']:.6f}/TB" for e in events)
+          styles="FontName=DejaVu Sans,FontSize=30,PrimaryColour=&H00592803,OutlineColour=&H00FFFFFF,BorderStyle=1,Outline=1,Shadow=0,Alignment=2,MarginV=15"
+          filt="scale=1728:972:flags=lanczos,pad=1920:1080:96:0:color=0xF7F2E8,setpts='"+expr+"',fps=fps=30:start_time=0,subtitles=output/U2_LEGENDAS_FALA_REAL_E_DORA_ASR_QA.srt:force_style='"+styles+"',tpad=stop_mode=clone:stop_duration=1,format=yuv420p"
+          call(["ffmpeg","-nostdin","-hide_banner","-loglevel","error","-y","-i",str(SRC),"-i",str(OUT/"U2_AUDIO_ORIGINAL_MAIS_DORA_QA.wav"),"-map","0:v:0","-map","1:a:0","-vf",filt,"-c:v","libx264","-preset","veryfast","-crf","22","-threads","3","-c:a","aac","-b:a","192k","-movflags","+faststart","-shortest",str(OUT/"U2_16x9_DORA_INCORPORADA_ASR_QA.mp4")])
+          call(["ffmpeg","-nostdin","-hide_banner","-loglevel","error","-i",str(OUT/"U2_16x9_DORA_INCORPORADA_ASR_QA.mp4"),"-f","null","-"])
+          print("Final candidate size", (OUT/"U2_16x9_DORA_INCORPORADA_ASR_QA.mp4").stat().st_size, "captions", len(cues), "seconds",len(combined)/sr)
+          
+          PY
+          python /tmp/montar.py
+      - name: Guardar os artefatos para avaliacao, sem publicacao
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: U2_DORA_MP4_E_LEGENDAS_ASR_QA_SEM_PUBLICAR
+          path: |
+            output/U2_16x9_DORA_INCORPORADA_ASR_QA.mp4
+            output/U2_LEGENDAS_FALA_REAL_E_DORA_ASR_QA.srt
+            output/U2_LEGENDAS_FALA_REAL_E_DORA_ASR_QA.vtt
+            output/QA_MONTAGEM_U2.json
+          if-no-files-found: warn
+          retention-days: 2
+          compression-level: 0

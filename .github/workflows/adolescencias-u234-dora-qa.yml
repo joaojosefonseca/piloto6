@@ -1,0 +1,66 @@
+name: QA acessibilidade Adolescencias M1 U2 U3 U4 Dora
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/adolescencias-u234-dora-qa.yml'
+permissions:
+  contents: read
+jobs:
+  sintetizar-dora:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        unit: [u2, u3, u4a, u4b]
+    env:
+      UNIT: ${{ matrix.unit }}
+    steps:
+      - name: Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Instalar dependencias CPU
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq espeak-ng libsndfile1
+          python -m pip install --disable-pip-version-check --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install --disable-pip-version-check --no-cache-dir "kokoro>=0.9.4" "soundfile>=0.12"
+      - name: Narrar descricoes com Kokoro pf_dora
+        shell: bash
+        run: |
+          cat > /tmp/speak.py <<'PY'
+          from pathlib import Path
+          from kokoro import KPipeline
+          import json, numpy as np, soundfile as sf, os, hashlib
+          scenes=json.loads(r'''{"u2":["Na abertura, um painel creme e azul apresenta o título Interseccionalidade, determinantes sociais de saúde e cultura digital. À direita, quatro adolescentes estão reunidos, sorrindo.","A tela destaca Adolescências em múltiplos contextos. À direita, uma adolescente de cabelos encaracolados escreve num caderno, com um notebook à sua frente.","O título é Adolescências em suas diversas realidades. Ao lado, cinco jovens conversam juntos, reunidos em torno de um computador.","Duas adolescentes estudam lado a lado: uma escreve num caderno e a outra observa, sorrindo.","Num ambiente acolhedor, um adolescente sentado conversa com um homem adulto, que o escuta atentamente.","Em primeiro plano, uma adolescente de cabelos encaracolados olha para a distância, numa área externa com outras pessoas ao fundo.","Um slide intitulado A vida digital também é vida social mostra seis tópicos: acesso, conteúdo, competências, mediação, algoritmos e uso crítico. À direita, jovens usam um computador em grupo.","Uma adolescente sorri enquanto utiliza o celular; atrás, há fotografias e anotações na parede do quarto.","Na síntese final lê-se Adolescências. Palavras destacadas incluem equidade, singularidade e direitos; uma fotografia mostra jovens juntos ao ar livre."],"u3":["No slide inicial lê-se Marco legal e sistema de garantia de direitos. O painel menciona ECA, proteção integral, rede e SINASE. Ao lado, cinco adolescentes estão reunidos.","Cinco jovens estão sentados juntos ao ar livre, em atitude descontraída e atenta.","Quatro adolescentes estudam em grupo, inclinados sobre os cadernos numa sala iluminada.","Um adolescente conversa e sorri com profissionais de saúde, educação e assistência social reunidos à volta de uma mesa.","Uma adolescente olha para baixo, enquanto uma mulher adulta põe a mão sobre o seu ombro num gesto de acolhimento.","Num espaço de atendimento, uma adolescente está sentada e conversa com uma profissional que lhe dedica atenção.","Quatro jovens convivem num espaço externo, sentados com cadernos e um computador portátil.","Jovens trabalham com cadernos numa sala, orientados por um adulto que acompanha a atividade.","O slide Saúde é direito também no socioeducativo mostra quatro princípios: SUS, cuidado integral, atenção humanizada e articulação em rede.","O vídeo encerra com uma fotografia de adolescentes sorrindo e conversando juntos ao ar livre."],"u4a":["O título Redução de danos: cuidar sem impor surge sobre um fundo claro e azul. Em destaque aparecem escuta, autonomia, proteção e vínculo.","Ao fim da tarde, três mulheres conversam sentadas numa arquibancada ao lado de um campo de futebol; uma usa um cordão de identificação profissional.","Um painel claro traz a frase Proteger e respeitar e contrapõe duas ideias: proteger não é silenciar e autonomia não é abandono.","Na arquibancada do campo, uma adolescente escuta outra jovem que fala com as mãos. O cenário tem luz quente do fim da tarde.","Um infográfico mostra quatro percentagens sobre substâncias: álcool, cinquenta e três vírgula seis por cento; cigarro convencional, dezoito vírgula cinco; cigarro eletrônico, vinte e nove vírgula seis; e outras drogas, oito vírgula três.","Num território comunitário, três mulheres conversam em pé. Uma delas usa colete de agente de saúde e outra veste uma blusa branca.","Uma jovem com mochila caminha por uma estrada de terra. Ao fundo, um veículo amarelo aproxima-se entre casas, árvores e morros.","Uma adolescente conversa com uma profissional de saúde, sentadas frente a frente numa sala iluminada, com uma planta sobre a mesa.","Na cena final, três mulheres estão sentadas na bancada do campo, conversando de frente umas para as outras."],"u4b":["Surge o título Existir entre fronteiras, microdrama audiovisual. Ao lado, três mulheres estão sentadas numa arquibancada de um centro comunitário.","Ana Clara e Manu estão numa arquibancada com a enfermeira Rita. É fim de tarde e há pessoas num campo esportivo ao fundo.","O enquadramento aproxima-se de duas jovens: uma fala, enquanto a outra apoia o rosto na mão e escuta.","Uma jovem caminha sozinha por uma estrada de terra, junto a casas e um campo. Um veículo amarelo segue ao longe.","Num espaço festivo iluminado por pequenas luzes, duas jovens conversam de lado, entre pessoas da comunidade.","Na arquibancada do centro comunitário, uma das jovens fala enquanto a enfermeira Rita lhe responde com atenção.","Sob luzes e bandeirolas de uma festa comunitária, uma adolescente e outro jovem caminham entre várias pessoas.","No encerramento, aparece a frase O cuidado que não impõe, acompanha, em letras azul-marinho e dourado sobre um painel creme."]}''')
+          unit=os.environ["UNIT"]
+          assert unit in scenes
+          pipe=KPipeline(lang_code="p")
+          out=Path("output")/unit
+          out.mkdir(parents=True,exist_ok=True)
+          manifest=[]
+          for index, text in enumerate(scenes[unit],1):
+              chunks=[np.asarray(audio,dtype=np.float32).flatten() for _g,_p,audio in pipe(text,voice="pf_dora",speed=1.0)]
+              assert chunks, f"Sem áudio: {unit} {index}"
+              x=np.concatenate(chunks)
+              assert len(x)>2400
+              peak=float(np.max(np.abs(x)))
+              if peak>0.89: x=x*(0.89/peak)
+              dest=out/f"AD_{index:02d}_DORA_PTBR.wav"
+              sf.write(str(dest),x,24000,subtype="PCM_16")
+              manifest.append({"scene":index,"text":text,"file":dest.name,"seconds":round(len(x)/24000,4),"samples":len(x),"voice":"pf_dora"})
+              print(unit,index,dest.name,round(len(x)/24000,2),flush=True)
+          (out/"manifest.json").write_text(json.dumps({"unit":unit,"model":"Kokoro-82M","voice":"pf_dora","language":"pt-BR","sample_rate":24000,"clips":manifest,"qa":"CANDIDATO - NECESSITA ESCUTA E REVISAO HUMANA - NAO PUBLICAR"},ensure_ascii=False,indent=2),encoding="utf-8")
+          
+          PY
+          python /tmp/speak.py
+      - name: Artefato restrito a QA
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: AD_DORA_${{ matrix.unit }}_CANDIDATO_QA
+          path: output/${{ matrix.unit }}/
+          if-no-files-found: warn
+          retention-days: 2
