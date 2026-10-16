@@ -82,13 +82,13 @@ jobs:
           (out/f"{u}_ASR_PALAVRAS.json").write_text(json.dumps(dict(language=info.language,duration=info.duration,segments=data),ensure_ascii=False,indent=2),encoding="utf-8")
           srt=[];vtt=["WEBVTT",""]
           for i,x in enumerate(data,1):
-              line=re.sub(r"\\s+"," ",x["text"]).strip()
+              line=re.sub(r"\s+"," ",x["text"]).strip()
               srt += [str(i),f"{stamp(x['start'],',')} --> {stamp(x['end'],',')}",line,""]
-              vtt += [f"{stamp(x['start','.')} --> {stamp(x['end','.')}",line,""]
-          (out/f"{u}_ASR_CANDIDATO.srt").write_text("\\n".join(srt),encoding="utf-8")
-          (out/f"{u}_ASR_CANDIDATO.vtt").write_text("\\n".join(vtt),encoding="utf-8")
+              vtt += [f"{stamp(x['start'],'.')} --> {stamp(x['end'],'.')}",line,""]
+          (out/f"{u}_ASR_CANDIDATO.srt").write_text("\n".join(srt),encoding="utf-8")
+          (out/f"{u}_ASR_CANDIDATO.vtt").write_text("\n".join(vtt),encoding="utf-8")
           with (out/"STATUS.txt").open("a",encoding="utf-8") as f:
-              f.write(f"ASR executado sobre audio real; {len(data)} segmentos; falta escuta e revisao humana. NAO PUBLICAR.\\n")
+              f.write(f"ASR executado sobre audio real; {len(data)} segmentos; falta escuta e revisao humana. NAO PUBLICAR.\n")
           PY
           python /tmp/asr.py
       - name: Evidencias e legendas temporarias
