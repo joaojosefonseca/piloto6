@@ -1,0 +1,71 @@
+name: QA Kokoro Dora PTBR audiodescricao U1 (CPU)
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .github/workflows/adolescencias-u1-tts.yml
+permissions:
+  contents: read
+jobs:
+  voz-natural:
+    runs-on: ubuntu-latest
+    timeout-minutes: 28
+    steps:
+      - name: Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install espeak and CPU TTS
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq espeak-ng libsndfile1
+          python -m pip install --disable-pip-version-check --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install --disable-pip-version-check --no-cache-dir "kokoro>=0.9.4" "soundfile>=0.12" 
+      - name: Generate nine narrations with pf_dora
+        run: |
+          mkdir -p output
+          cat >/tmp/speak.py <<'PY'
+          import json, numpy as np, soundfile as sf
+          from pathlib import Path
+          from kokoro import KPipeline
+          scripts=[
+          "Abertura. Sobre fundo creme e azul-marinho, lê-se: Adolescência como construção social. À direita, um grupo diverso de jovens está sentado e conversa.",
+          "Um quadro compara cenas da Idade Média, da modernidade e da sociedade contemporânea, com fotografias ilustrativas de épocas diferentes.",
+          "Na tela E no Brasil?, um esquema liga infância, adolescência e vida adulta. Outro reúne escola, pedagogia, psicologia, psiquiatria e políticas públicas.",
+          "Um adolescente de cabelos cacheados, com uma mochila, está sentado numa escadaria ao ar livre e olha para longe.",
+          "Uma adolescente conversa com uma mulher num espaço com plantas. Mais adiante, aparecem grupos de jovens conversando e estudando.",
+          "O título Um tempo de reorganização aparece junto de uma jovem com mochila. O quadro destaca corpo, autoimagem, afetividade e sexualidade.",
+          "Três jovens caminham juntos ao ar livre, carregando materiais escolares. Em cenas posteriores, outros jovens estudam e conversam.",
+          "O quadro Adolescências, no plural reúne retratos de jovens de diferentes contextos. Destaca território, condições sociais, cultura, oportunidades e proteção.",
+          "Um adolescente conversa com um homem adulto, sentados frente a frente numa sala acolhedora. O encerramento liga corpo, história, subjetividade, relações, sociedade, desigualdades e direitos à palavra Adolescências."
+          ]
+          pipe=KPipeline(lang_code="p")
+          manifest=[]
+          for i, text in enumerate(scripts,1):
+            gen=pipe(text,voice="pf_dora",speed=1.0)
+            chunks=[np.asarray(audio,dtype=np.float32).flatten() for _g,_p,audio in gen]
+            assert chunks, f"no audio for {i}"
+            x=np.concatenate(chunks)
+            assert len(x)>24000, f"too short {i}"
+            peak=float(np.max(np.abs(x)))
+            if peak>0.89: x=x*(0.89/peak)
+            f=f"output/AD_{i:02d}_KOKORO_DORA_PTBR.wav"
+            sf.write(f,x,24000,subtype="PCM_16")
+            manifest.append({"id":i,"text":text,"file":f.replace("output/",""),"duration_seconds":len(x)/24000,"samples":len(x),"peak":float(np.max(np.abs(x)))})
+            print(i,"dur",round(len(x)/24000,2),"sec")
+          Path("output/MANIFESTO_AD_KOKORO_PTBR.json").write_text(json.dumps({"source":"hexgrad/Kokoro-82M","voice":"pf_dora","language":"pt-BR","sample_rate":24000,"clips":manifest},ensure_ascii=False,indent=2),encoding="utf-8")
+          PY
+          python /tmp/speak.py
+      - name: QA Voice files
+        run: |
+          ls -lah output/
+          test $(ls output/AD_*.wav | wc -l) -eq 9
+      - name: Export voice files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: U1_DORA_KOKORO_PTBR_QA
+          path: output/
+          if-no-files-found: warn
+          retention-days: 2
