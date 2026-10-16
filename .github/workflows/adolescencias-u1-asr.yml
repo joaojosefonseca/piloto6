@@ -1,8 +1,8 @@
 name: QA transcription Adolescencias U1 (CPU only)
 on:
-  push:
+  pull_request:
     branches:
-      - qa/adolescencias-u1-asr-20261015
+      - main
     paths:
       - .github/workflows/adolescencias-u1-asr.yml
   workflow_dispatch:
